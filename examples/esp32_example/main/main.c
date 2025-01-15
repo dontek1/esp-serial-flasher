@@ -36,6 +36,7 @@ static uint8_t led_b = 0x10;
 
 static bool led_state = false;
 static bool led_toggle = false;
+static uint32_t led_intv_ms = 1000;
 
 static void led_configure(void)
 {
@@ -77,7 +78,7 @@ void led_blink(void *arg)
         {
             led_state = !led_state;
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(led_intv_ms));
     }
 }
 
@@ -149,11 +150,31 @@ static void gpio_select_baud(void)
     int inBaud4 = gpio_get_level(GPIO_INPUT_BAUD4);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD4, inBaud4);
     
-    if(inBaud4 == 0) higher_baudrate = 3686400;
-    else if(inBaud3 == 0) higher_baudrate = 921600;
-    else if(inBaud2 == 0) higher_baudrate = 460800;
-    else if(inBaud1 == 0) higher_baudrate = 230400;
-    else higher_baudrate = 115200;
+    if(inBaud4 == 0)
+    {
+        higher_baudrate = 3686400;
+        led_intv_ms = 25;
+    }
+    else if(inBaud3 == 0)
+    {
+        higher_baudrate = 921600;
+        led_intv_ms = 125;
+    }
+    else if(inBaud2 == 0)
+    {
+        higher_baudrate = 460800;
+        led_intv_ms = 250;
+    }
+    else if(inBaud1 == 0)
+    {
+        higher_baudrate = 230400;
+        led_intv_ms = 500;
+    }
+    else
+    {
+        higher_baudrate = 115200;
+        led_intv_ms = 1000;
+    }
 }
 
 static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
@@ -183,7 +204,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
             buf[len] = '\0';
             ESP_LOGI(TAG, "Recv str: %s", (char *) buf);
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     ESP_ERROR_CHECK(uart_driver_delete(uart_port));
@@ -222,7 +243,7 @@ void app_main(void)
     xTaskCreate(led_blink, "led_blink", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
 
     //uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
-    //vTaskDelay(500 / portTICK_PERIOD_MS);
+    //vTaskDelay(pdMS_TO_TICKS(500));
 
     gpio_setup();
 
@@ -271,7 +292,7 @@ void app_main(void)
         esp_loader_reset_target();
 
         // Delay for skipping the boot message of the targets
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(500));
 
         // Forward slave's serial output
         ESP_LOGI(TAG, "********************************************");
