@@ -21,6 +21,8 @@
 
 static const char *TAG = "serial_flasher";
 
+//#define ENABLE_UART_CHECK
+
 static loader_esp32_config_t config =
 {
     .baud_rate = 115200
@@ -60,6 +62,10 @@ static void led_update(uint8_t r, uint8_t g, uint8_t b)
     led_g = g;
     led_b = b;
 }
+
+#define LED_SET_ESP1()      led_update(0x00, 0x00, 0x80)
+#define LED_SET_ESP2()      led_update(0xFF, 0x45, 0x00)
+#define LED_SET_ERROR()     led_update(0xFF, 0x00, 0x00)
 
 void led_blink(void *arg)
 {
@@ -177,6 +183,7 @@ static void gpio_select_baud(void)
     }
 }
 
+#ifdef ENABLE_UART_CHECK
 static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 {
     uart_config_t uart_config =
@@ -209,12 +216,46 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 
     ESP_ERROR_CHECK(uart_driver_delete(uart_port));
 }
+#endif
+
+#ifdef SINGLE_TARGET_SUPPORT
+
+// For esp32s3 and later chips
+#define BOOTLOADER_ADDRESS_V1       0x0
+#define PARTITION_ADDRESS           0x8000
+#define APPLICATION_ADDRESS         0x10000
+
+extern const unsigned char bootloader_start[] asm("_binary_bootloader_bin_start");
+extern const unsigned char bootloader_end[]   asm("_binary_bootloader_bin_end");
+
+extern const unsigned char partition_table_start[] asm("_binary_partition_table_bin_start");
+extern const unsigned char partition_table_end[]   asm("_binary_partition_table_bin_end");
+
+extern const unsigned char https_mbedtls_start[] asm("_binary_https_mbedtls_bin_start");
+extern const unsigned char https_mbedtls_end[]   asm("_binary_https_mbedtls_bin_end");
+
+void get_example_binaries_esp32s3(example_binaries_t *bins)
+{
+    bins->boot.data = (const uint8_t *) &bootloader_start;
+    bins->boot.size = bootloader_end - bootloader_start;
+    bins->boot.addr = BOOTLOADER_ADDRESS_V1;
+
+    bins->part.data = (const uint8_t *) &partition_table_start;
+    bins->part.size = partition_table_end - partition_table_start;
+    bins->part.addr = PARTITION_ADDRESS;
+
+    bins->app.data  = (const uint8_t *) &https_mbedtls_start;
+    bins->app.size  = https_mbedtls_end - https_mbedtls_start;
+    bins->app.addr  = APPLICATION_ADDRESS;
+}
+
+#endif
 
 static bool do_flash(const char *name, const uint8_t *bin, size_t size, size_t address)
 {
     bool result = false;
 
-    ESP_LOGI(TAG, "Loading %s...", name);
+    ESP_LOGI(TAG, "Loading %s from %p to 0x%08x...", name, bin, address);
     ESP_LOGI(TAG, "Baud: %lu", higher_baudrate);
     ESP_LOGI(TAG, "Size: %d bytes", size);
 
@@ -242,8 +283,9 @@ void app_main(void)
     led_configure();
     xTaskCreate(led_blink, "led_blink", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
 
-    //uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
-    //vTaskDelay(pdMS_TO_TICKS(500));
+#ifdef ENABLE_UART_CHECK
+    uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
+#endif
 
     gpio_setup();
 
@@ -254,7 +296,7 @@ void app_main(void)
         config.uart_tx_pin = GPIO_NUM_12;
         config.reset_trigger_pin = GPIO_NUM_6;
         config.gpio0_trigger_pin = GPIO_NUM_7;
-        led_update(0x00, 0x80, 0x00);
+        LED_SET_ESP1();
     }
     else
     {
@@ -263,13 +305,13 @@ void app_main(void)
         config.uart_tx_pin = GPIO_NUM_18;
         config.reset_trigger_pin = GPIO_NUM_4;
         config.gpio0_trigger_pin = GPIO_NUM_5;
-        led_update(0xFF, 0x45, 0x00);
+        LED_SET_ESP2();
     }
 
     if(loader_port_esp32_init(&config) != ESP_LOADER_SUCCESS)
     {
         ESP_LOGE(TAG, "serial initialization failed.");
-        led_update(0xFF, 0x00, 0x00);
+        LED_SET_ERROR();
         return;
     }
 
@@ -281,12 +323,19 @@ void app_main(void)
     if(result)
     {
         example_binaries_t bin;
+
+#ifdef SINGLE_TARGET_SUPPORT        
+        get_example_binaries_esp32s3(&bin);
+#else
         get_example_binaries(esp_loader_get_target(), &bin);
+#endif
+        
         led_toggle = true;
 
-        //do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
-        //do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
-        result = do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
+        result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
+        result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
+        result &= do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
+        
         ESP_LOGI(TAG, "Done!");
 
         esp_loader_reset_target();
@@ -306,7 +355,7 @@ void app_main(void)
 
     if(!result)
     {
-        led_update(0xFF, 0x00, 0x00);
+        LED_SET_ERROR();
     }
 
     vTaskDelete(NULL);

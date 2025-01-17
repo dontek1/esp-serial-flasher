@@ -1,8 +1,14 @@
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DSINGLE_TARGET_SUPPORT")
+
 set(srcs main.c ../../common/example_common.c)
 set(include_dirs . ../../common)
+set(bin_dir ../../../../https_mbedtls/build)
 
 idf_component_register(SRCS ${srcs}
-                       INCLUDE_DIRS ${include_dirs})
+                       INCLUDE_DIRS ${include_dirs}
+                       EMBED_FILES  "${bin_dir}/bootloader/bootloader.bin"
+                                    "${bin_dir}/partition_table/partition-table.bin"
+                                    "${bin_dir}/https_mbedtls.bin")
 set(target ${COMPONENT_LIB})
 
 # Embed binaries into the app.

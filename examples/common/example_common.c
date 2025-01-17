@@ -241,6 +241,8 @@ void get_example_ram_app_binary(target_chip_t target, example_ram_app_binary_t *
     }
 }
 
+#else
+	#warning 'SINGLE_TARGET_SUPPORT defined'
 #endif
 
 static const char *get_error_string(const esp_loader_error_t error)
