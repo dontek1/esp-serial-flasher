@@ -9,19 +9,37 @@
 
 #include <sys/param.h>
 #include <string.h>
+
 #include "esp_err.h"
-#include "esp_timer.h"
 #include "esp_log.h"
-#include "driver/uart.h"
-#include "driver/gpio.h"
+#include "esp_timer.h"
+
 #include "esp32_port.h"
 #include "esp_loader.h"
+
+#include "esp_app_format.h"
+#include "esp_ota_ops.h"
+
+#include "esp_flash.h"
+
+#include "esp_http_client.h"
+
+#include "driver/uart.h"
+#include "driver/gpio.h"
+
 #include "example_common.h"
+
 #include "led_strip.h"
+
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#include "protocol_examples_common.h"
 
 static const char *TAG = "serial_flasher";
 
 //#define ENABLE_UART_CHECK
+#define ENABLE_HTTP_DOWNLOAD
 
 static loader_esp32_config_t config =
 {
@@ -32,12 +50,10 @@ static uint32_t higher_baudrate = 115200;
 
 static led_strip_handle_t led_strip;
 
-static uint8_t led_r = 0x10;
-static uint8_t led_g = 0x10;
-static uint8_t led_b = 0x10;
+static uint8_t R = 0x10;
+static uint8_t G = 0x10;
+static uint8_t B = 0x10;
 
-static bool led_state = false;
-static bool led_toggle = false;
 static uint32_t led_intv_ms = 1000;
 
 static void led_configure(void)
@@ -56,41 +72,36 @@ static void led_configure(void)
     led_strip_clear(led_strip);
 }
 
-static void led_update(uint8_t r, uint8_t g, uint8_t b)
-{
-    led_r = r;
-    led_g = g;
-    led_b = b;
-}
+#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)
+#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)
 
-#define LED_SET_ESP1()      led_update(0x00, 0x00, 0x80)
-#define LED_SET_ESP2()      led_update(0xFF, 0x45, 0x00)
-#define LED_SET_ERROR()     led_update(0xFF, 0x00, 0x00)
+#define LED_FILE_ERROR()        do { R=0x80; G=0x80; B=0x00; led_intv_ms=2000; } while(0)
+#define LED_TARGET_ERROR()      do { R=0x80; G=0x00; B=0x80; led_intv_ms=2000; } while(0)
+#define LED_FLASH_ERROR()       do { R=0x80; G=0x00; B=0x00; led_intv_ms=2000; } while(0)
 
 void led_blink(void *arg)
 {
+    bool led_state = true;
+
     while(1)
     {
         if(led_state)
         {
-            led_strip_set_pixel(led_strip, 0, led_r, led_g, led_b);
+            led_strip_set_pixel(led_strip, 0, R, G, B);
             led_strip_refresh(led_strip);
         }
         else
         {
             led_strip_clear(led_strip);
         }
-        if(led_toggle)
-        {
-            led_state = !led_state;
-        }
+        led_state = !led_state;
         vTaskDelay(pdMS_TO_TICKS(led_intv_ms));
     }
 }
 
 // Max line size
-#define BUF_LEN 128
-static uint8_t buf[BUF_LEN] = {0};
+#define SLV_BUF_LEN 128
+static uint8_t slv_buf[SLV_BUF_LEN] = {0};
 
 void slave_monitor(void *arg)
 {
@@ -103,9 +114,9 @@ void slave_monitor(void *arg)
 
     while(1)
     {
-        int rxBytes = uart_read_bytes(config.uart_port, buf, BUF_LEN, 100 / portTICK_PERIOD_MS);
-        buf[rxBytes] = '\0';
-        printf("%s", buf);
+        int rxBytes = uart_read_bytes(config.uart_port, slv_buf, SLV_BUF_LEN, 100 / portTICK_PERIOD_MS);
+        slv_buf[rxBytes] = '\0';
+        printf("%s", slv_buf);
     }
 }
 
@@ -116,7 +127,14 @@ void slave_monitor(void *arg)
 #define GPIO_INPUT_BAUD3    GPIO_NUM_47
 #define GPIO_INPUT_BAUD4    GPIO_NUM_21
 
-#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_ESPn)|(1ULL<<GPIO_INPUT_BAUD1)|(1ULL<<GPIO_INPUT_BAUD2)|(1ULL<<GPIO_INPUT_BAUD3)|(1ULL<<GPIO_INPUT_BAUD4))
+#define GPIO_INPUT_URL      GPIO_NUM_1
+
+#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_ESPn)\
+                            |(1ULL<<GPIO_INPUT_BAUD1)\
+                            |(1ULL<<GPIO_INPUT_BAUD2)\
+                            |(1ULL<<GPIO_INPUT_BAUD3)\
+                            |(1ULL<<GPIO_INPUT_BAUD4)\
+                            |(1ULL<<GPIO_INPUT_URL))
 
 static void gpio_setup(void)
 {
@@ -133,17 +151,35 @@ static void gpio_setup(void)
     gpio_config(&io_conf);
 }
 
-static int gpio_select_esp(void)
+static void gpio_select_esp(void)
 {
     // GND --- IN.ESPn => select ESP
     int inEsp = gpio_get_level(GPIO_INPUT_ESPn);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_ESPn, inEsp);
-    return inEsp;
+
+    if(inEsp == 1)
+    {
+        config.uart_port = UART_NUM_1;
+        config.uart_rx_pin = GPIO_NUM_11;
+        config.uart_tx_pin = GPIO_NUM_12;
+        config.reset_trigger_pin = GPIO_NUM_6;
+        config.gpio0_trigger_pin = GPIO_NUM_7;
+        LED_SET_ESP1();
+    }
+    else
+    {
+        config.uart_port = UART_NUM_2;
+        config.uart_rx_pin = GPIO_NUM_17;
+        config.uart_tx_pin = GPIO_NUM_18;
+        config.reset_trigger_pin = GPIO_NUM_4;
+        config.gpio0_trigger_pin = GPIO_NUM_5;
+        LED_SET_ESP2();
+    }
 }
 
 static void gpio_select_baud(void)
 {
-    // GND -- IN.Baud1/IN.Baud2/IN.Baud3 => select baud
+    // GND --- IN.Baud1-4 => select baud
     int inBaud1 = gpio_get_level(GPIO_INPUT_BAUD1);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD1, inBaud1);
 
@@ -196,7 +232,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    ESP_ERROR_CHECK(uart_driver_install(uart_port, BUF_LEN * 2, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_driver_install(uart_port, SLV_BUF_LEN * 2, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(uart_port, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(uart_port, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
@@ -205,11 +241,11 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
     for(int i = 0; i < 30; i++)
     {
         // Read data from the UART
-        int len = uart_read_bytes(uart_port, buf, (BUF_LEN - 1), 20 / portTICK_PERIOD_MS);
+        int len = uart_read_bytes(uart_port, slv_buf, (SLV_BUF_LEN - 1), 20 / portTICK_PERIOD_MS);
         if(len)
         {
-            buf[len] = '\0';
-            ESP_LOGI(TAG, "Recv str: %s", (char *) buf);
+            slv_buf[len] = '\0';
+            ESP_LOGI(TAG, "Recv str: %s", (char *) slv_buf);
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -225,6 +261,229 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 #define PARTITION_ADDRESS           0x8000
 #define APPLICATION_ADDRESS         0x10000
 
+void init_example_binaries_esp32s3(example_binaries_t *bins)
+{
+    bins->boot.data = NULL;
+    bins->boot.size = 0;
+    bins->boot.addr = BOOTLOADER_ADDRESS_V1;
+
+    bins->part.data = NULL;
+    bins->part.size = 0;
+    bins->part.addr = PARTITION_ADDRESS;
+
+    bins->app.data  = NULL;
+    bins->app.size  = 0;
+    bins->app.addr  = APPLICATION_ADDRESS;
+}
+
+#ifdef ENABLE_HTTP_DOWNLOAD
+
+#define DOWNLOAD_ADDRESS    (0x00281000)
+
+#define DOWNLOAD_PROGRESS   (10)
+
+esp_partition_mmap_handle_t download_map_handle;
+const void *download_map_ptr;
+
+#define DLD_BUF_SIZE 8192
+static char download_buf[DLD_BUF_SIZE+1] = {0};
+
+static void http_cleanup(esp_http_client_handle_t client)
+{
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+}
+
+char *http_url = NULL;
+static void gpio_select_url(void)
+{
+    // GND --- IN.URL => select url
+    int inUrl = gpio_get_level(GPIO_INPUT_URL);
+    ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_URL, inUrl);
+
+    if(inUrl == 1)
+    {
+        http_url = "http://example.com/file1.bin";
+    }
+    else
+    {
+        http_url = "http://example.com/file2.bin";
+    }
+}
+
+bool get_example_binaries_esp32s3(example_binaries_t *bins)
+{
+    bool result = false;
+
+    init_example_binaries_esp32s3(bins);    
+    gpio_select_url();
+
+    int64_t t0_us = esp_timer_get_time();
+
+    esp_http_client_config_t config =
+    {
+        .url = http_url,
+        .cert_pem = NULL,
+        .timeout_ms = 3000,
+        .keep_alive_enable = true,
+        .skip_cert_common_name_check = true
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if(client == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to initialise HTTP connection");
+        return result;
+    }
+    ESP_LOGI(TAG, "HTTP connection initialised");
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if(err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return result;
+    }
+    ESP_LOGI(TAG, "HTTP connection opened, URL: %s", config.url);
+
+    int64_t cont_len = esp_http_client_fetch_headers(client);
+    if(cont_len > 0)
+    {
+        ESP_LOGI(TAG, "content-length is %lld", cont_len);
+    }
+
+    int bin_len = 0;
+    int pct_read = 0;
+    int pct_old = -1;    
+
+    bool image_header_was_checked = false;
+    
+    uint32_t write_address = DOWNLOAD_ADDRESS;
+
+    while(1)
+    {
+        int data_read = esp_http_client_read(client, download_buf, DLD_BUF_SIZE);
+        if(data_read < 0)
+        {
+            ESP_LOGE(TAG, "Error: SSL data read error");
+            http_cleanup(client);
+            break;
+        }
+        else if(data_read > 0)
+        {
+            if(image_header_was_checked == false)
+            {
+                esp_app_desc_t new_app_info;
+                if(data_read > sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+                {
+                    memcpy(&new_app_info, &download_buf[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)], sizeof(esp_app_desc_t));
+                    ESP_LOGI(TAG, "Firmware info (%lx)", new_app_info.magic_word);
+                    ESP_LOGI(TAG, "- project name: %s", new_app_info.project_name);
+                    ESP_LOGI(TAG, "- firmware version: %s", new_app_info.version);
+                    ESP_LOGI(TAG, "- IDF version: %s", new_app_info.idf_ver);
+                    ESP_LOGI(TAG, "- compiled date/time: %s %s", new_app_info.date, new_app_info.time);
+                    
+                    //TODO: validate...
+                    image_header_was_checked = true;
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "received package is not fit len");
+                    http_cleanup(client);
+                    break;
+                }
+            }
+            
+	        err = esp_flash_erase_region(NULL, write_address, DLD_BUF_SIZE);
+            if(err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "Error erasing flash address at 0x%lu, size=%d", write_address, DLD_BUF_SIZE);
+                break;
+            }
+
+            err = esp_flash_write(NULL, (void *) download_buf, write_address, data_read);
+            if(err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "Error writing %d bytes to flash address 0x%lu", data_read, write_address);
+                break;
+            }
+
+            write_address += data_read;
+            bin_len += data_read;
+            ESP_LOGD(TAG, "Written image length %d", bin_len);
+
+            if(cont_len > 0)
+            {
+                pct_read = (bin_len * 100) / cont_len;
+                pct_read = pct_read - (pct_read % DOWNLOAD_PROGRESS);
+
+                if(pct_read != pct_old)
+                {
+                    ESP_LOGI(TAG, "Downloading & writing to flash %d%%", pct_read);
+                    pct_old = pct_read;
+                }
+            }
+        }
+        else if(data_read == 0)
+        {
+           /*
+            * As esp_http_client_read never returns negative error code, we rely on
+            * `errno` to check for underlying transport connectivity closure if any
+            */
+            if(errno == ECONNRESET || errno == ENOTCONN)
+            {
+                ESP_LOGE(TAG, "Connection closed, errno = %d", errno);
+                break;
+            }
+            if(esp_http_client_is_complete_data_received(client) == true)
+            {
+                ESP_LOGI(TAG, "Connection closed");
+                break;
+            }
+        }
+    }
+
+    result = esp_http_client_is_complete_data_received(client);
+    if(result)
+    {
+        int64_t t1_us = esp_timer_get_time();
+        int64_t tm_us = t1_us - t0_us;    
+        double tm_sec = (double) (tm_us / 1000000.0);
+        ESP_LOGI(TAG, "Downloaded & wrote %d bytes to flash in %.1f secs", bin_len, tm_sec);
+
+        const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
+        if(partition != NULL)
+        {
+            err = esp_partition_mmap(partition, 0, partition->size, ESP_PARTITION_MMAP_DATA, &download_map_ptr, &download_map_handle);
+            if(err == ESP_OK)
+            {
+                ESP_LOGI(TAG, "'download' partition mapped to data memory address %p", download_map_ptr);
+                bins->app.data = (const uint8_t *) download_map_ptr;
+                bins->app.size = bin_len;
+            }
+            else
+            {
+                ESP_LOGE(TAG, "esp_partition_mmap returned %d", err);
+                result = false;
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "'download' partition is NULL");
+            result = false;
+        }
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Error in receiving complete file");
+    }
+
+    http_cleanup(client);
+    return result;
+}
+
+#else // !ENABLE_HTTP_DOWNLOAD
+
 extern const unsigned char bootloader_start[] asm("_binary_bootloader_bin_start");
 extern const unsigned char bootloader_end[]   asm("_binary_bootloader_bin_end");
 
@@ -234,45 +493,63 @@ extern const unsigned char partition_table_end[]   asm("_binary_partition_table_
 extern const unsigned char https_mbedtls_start[] asm("_binary_https_mbedtls_bin_start");
 extern const unsigned char https_mbedtls_end[]   asm("_binary_https_mbedtls_bin_end");
 
-void get_example_binaries_esp32s3(example_binaries_t *bins)
+bool get_example_binaries_esp32s3(example_binaries_t *bins)
 {
+    init_example_binaries_esp32s3(bins);
+    
     bins->boot.data = (const uint8_t *) &bootloader_start;
     bins->boot.size = bootloader_end - bootloader_start;
-    bins->boot.addr = BOOTLOADER_ADDRESS_V1;
 
     bins->part.data = (const uint8_t *) &partition_table_start;
     bins->part.size = partition_table_end - partition_table_start;
-    bins->part.addr = PARTITION_ADDRESS;
 
     bins->app.data  = (const uint8_t *) &https_mbedtls_start;
     bins->app.size  = https_mbedtls_end - https_mbedtls_start;
-    bins->app.addr  = APPLICATION_ADDRESS;
+
+    return true;
 }
 
-#endif
+#endif /* USE_HTTP_DOWNLOAD */
+
+#endif /* SINGLE_TARGET_SUPPORT */
 
 static bool do_flash(const char *name, const uint8_t *bin, size_t size, size_t address)
 {
     bool result = false;
 
-    ESP_LOGI(TAG, "Loading %s from %p to 0x%08x...", name, bin, address);
-    ESP_LOGI(TAG, "Baud: %lu", higher_baudrate);
-    ESP_LOGI(TAG, "Size: %d bytes", size);
-
-    int64_t t0_us = esp_timer_get_time();
-    esp_loader_error_t err = flash_binary(bin, size, address);
-    int64_t t1_us = esp_timer_get_time();
-    
-    if(err == ESP_LOADER_SUCCESS)
+    if(bin == NULL)
     {
-        int64_t tm_us = t1_us - t0_us;    
-        double tm_sec = (double) (tm_us / 1000000.0);
-        double size_kb = (double) (size / 1024.0);
-        double kb_s = size_kb / tm_sec;
+        ESP_LOGE(TAG, "Invalid bin data for %s", name);
+    }
+    else if(size == 0)
+    {
+        ESP_LOGE(TAG, "Invalid bin size for %s", name);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Loading %s from %p to 0x%08x...", name, bin, address);
+        ESP_LOGI(TAG, "Baud: %lu", higher_baudrate);
+        ESP_LOGI(TAG, "Size: %d bytes", size);
 
-        ESP_LOGI(TAG, "Time: %.1f secs", tm_sec);
-        ESP_LOGI(TAG, "Rate: %.1f kB/s\n", kb_s);
-        result = true;
+        int64_t t0_us = esp_timer_get_time();
+        esp_loader_error_t err = flash_binary(bin, size, address);
+        int64_t t1_us = esp_timer_get_time();
+        
+        if(err == ESP_LOADER_SUCCESS)
+        {
+            int64_t tm_us = t1_us - t0_us;    
+            double tm_sec = (double) (tm_us / 1000000.0);
+            double size_kb = (double) (size / 1024.0);
+            double kb_s = size_kb / tm_sec;
+
+            ESP_LOGI(TAG, "Time: %.1f secs", tm_sec);
+            ESP_LOGI(TAG, "Rate: %.1f kB/s\n", kb_s);
+            result = true;
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Error flashing %s: %d", name, err);
+        }
     }
 
     return result;
@@ -280,38 +557,59 @@ static bool do_flash(const char *name, const uint8_t *bin, size_t size, size_t a
 
 void app_main(void)
 {
+    bool result = false;
+
+    gpio_setup();
+
     led_configure();
     xTaskCreate(led_blink, "led_blink", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
+
+#ifdef ENABLE_HTTP_DOWNLOAD
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // OTA app partition table has a smaller NVS partition size than the non-OTA
+        // partition table. This size mismatch may cause NVS initialization to fail.
+        // If this happens, we erase NVS partition and initialize NVS again.
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
+     * Read "Establishing Wi-Fi or Ethernet Connection" section in
+     * examples/protocols/README.md for more information about this function.
+     */
+    ESP_ERROR_CHECK(example_connect());
+#endif
+
+    gpio_select_esp();
+
+    example_binaries_t bin;
+#ifdef SINGLE_TARGET_SUPPORT        
+    result = get_example_binaries_esp32s3(&bin);
+#else
+    result = get_example_binaries(esp_loader_get_target(), &bin);
+#endif
+    if(!result)
+    {
+        ESP_LOGE(TAG, "error getting binaries.");
+        LED_FILE_ERROR();
+        led_intv_ms = 2000;
+        return;
+    }
 
 #ifdef ENABLE_UART_CHECK
     uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
 #endif
 
-    gpio_setup();
-
-    if(gpio_select_esp() == 1)
-    {
-        config.uart_port = UART_NUM_1;
-        config.uart_rx_pin = GPIO_NUM_11;
-        config.uart_tx_pin = GPIO_NUM_12;
-        config.reset_trigger_pin = GPIO_NUM_6;
-        config.gpio0_trigger_pin = GPIO_NUM_7;
-        LED_SET_ESP1();
-    }
-    else
-    {
-        config.uart_port = UART_NUM_2;
-        config.uart_rx_pin = GPIO_NUM_17;
-        config.uart_tx_pin = GPIO_NUM_18;
-        config.reset_trigger_pin = GPIO_NUM_4;
-        config.gpio0_trigger_pin = GPIO_NUM_5;
-        LED_SET_ESP2();
-    }
-
     if(loader_port_esp32_init(&config) != ESP_LOADER_SUCCESS)
     {
         ESP_LOGE(TAG, "serial initialization failed.");
-        LED_SET_ERROR();
+        LED_TARGET_ERROR();
+        led_intv_ms = 2000;
         return;
     }
 
@@ -319,24 +617,21 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Connecting on UART%lu", config.uart_port);
 
-    bool result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
+    result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
     if(result)
     {
-        example_binaries_t bin;
-
-#ifdef SINGLE_TARGET_SUPPORT        
-        get_example_binaries_esp32s3(&bin);
-#else
-        get_example_binaries(esp_loader_get_target(), &bin);
-#endif
-        
-        led_toggle = true;
-
-        result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
-        result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
+        //result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
+        //result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
         result &= do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
-        
-        ESP_LOGI(TAG, "Done!");
+        if(result)
+        {
+            // TODO: unmap partition?
+            ESP_LOGI(TAG, "Success!");
+        }
+        else
+        {
+            LED_FLASH_ERROR();
+        }
 
         esp_loader_reset_target();
 
@@ -349,14 +644,11 @@ void app_main(void)
         ESP_LOGI(TAG, "********************************************");
         xTaskCreate(slave_monitor, "slave_monitor", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
     }
-
-    led_toggle = false;
-    led_state = true;
-
-    if(!result)
+    else
     {
-        LED_SET_ERROR();
+        LED_TARGET_ERROR();
     }
+    led_intv_ms = 2000;
 
     vTaskDelete(NULL);
 }
