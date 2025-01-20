@@ -41,6 +41,12 @@ static const char *TAG = "serial_flasher";
 //#define ENABLE_UART_CHECK
 #define ENABLE_HTTP_DOWNLOAD
 
+// Flashing bootloader/partition table from HTTP server not supported/TBD.
+#ifndef ENABLE_HTTP_DOWNLOAD
+#define ENABLE_FLASH_BOOTLOADER
+#define ENABLE_FLASH_PARTTABLE
+#endif
+
 static loader_esp32_config_t config =
 {
     .baud_rate = 115200
@@ -54,7 +60,28 @@ static uint8_t R = 0x10;
 static uint8_t G = 0x10;
 static uint8_t B = 0x10;
 
-static uint32_t led_intv_ms = 1000;
+enum blink_rate_e
+{
+    BLINK_RATE_DEF=0,
+    BLINK_RATE_368M,
+    BLINK_RATE_921K,
+    BLINK_RATE_460K,
+    BLINK_RATE_230K,
+    BLINK_RATE_115K,
+    BLINK_RATE_ERR
+};
+
+static uint8_t blink_rate = BLINK_RATE_DEF;
+
+#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)
+#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)
+
+#define LED_SET_CONNECTED()     do { R=0x00; G=0x80; B=0x00; } while(0)
+#define LED_SET_ERROR(r,g,b)    do { R=r; G=g; B=b; blink_rate=BLINK_RATE_ERR; } while(0)
+
+#define LED_FILE_ERROR()        LED_SET_ERROR(0x80,0x80,0x00)
+#define LED_TARGET_ERROR()      LED_SET_ERROR(0x80,0x00,0x80)
+#define LED_FLASH_ERROR()       LED_SET_ERROR(0x80,0x00,0x00)
 
 static void led_configure(void)
 {
@@ -72,16 +99,10 @@ static void led_configure(void)
     led_strip_clear(led_strip);
 }
 
-#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)
-#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)
-
-#define LED_FILE_ERROR()        do { R=0x80; G=0x80; B=0x00; led_intv_ms=2000; } while(0)
-#define LED_TARGET_ERROR()      do { R=0x80; G=0x00; B=0x80; led_intv_ms=2000; } while(0)
-#define LED_FLASH_ERROR()       do { R=0x80; G=0x00; B=0x00; led_intv_ms=2000; } while(0)
-
 void led_blink(void *arg)
 {
     bool led_state = true;
+    uint32_t led_intv_ms = 1000;
 
     while(1)
     {
@@ -89,12 +110,25 @@ void led_blink(void *arg)
         {
             led_strip_set_pixel(led_strip, 0, R, G, B);
             led_strip_refresh(led_strip);
+            led_state = false;
         }
         else
         {
             led_strip_clear(led_strip);
+            led_state = true;
         }
-        led_state = !led_state;
+
+        switch(blink_rate)
+        {
+            case BLINK_RATE_DEF: led_intv_ms = 2000; break;
+            case BLINK_RATE_368M: led_intv_ms = 25; break;
+            case BLINK_RATE_921K: led_intv_ms = 125; break;
+            case BLINK_RATE_460K: led_intv_ms = 250; break;
+            case BLINK_RATE_230K: led_intv_ms = 500; break;
+            case BLINK_RATE_115K: led_intv_ms = 1000; break;
+            default: led_intv_ms = 2000; break; // BLINK_RATE_ERR
+        }
+
         vTaskDelay(pdMS_TO_TICKS(led_intv_ms));
     }
 }
@@ -195,27 +229,27 @@ static void gpio_select_baud(void)
     if(inBaud4 == 0)
     {
         higher_baudrate = 3686400;
-        led_intv_ms = 25;
+        blink_rate = BLINK_RATE_368M;
     }
     else if(inBaud3 == 0)
     {
         higher_baudrate = 921600;
-        led_intv_ms = 125;
+        blink_rate = BLINK_RATE_921K;
     }
     else if(inBaud2 == 0)
     {
         higher_baudrate = 460800;
-        led_intv_ms = 250;
+        blink_rate = BLINK_RATE_460K;
     }
     else if(inBaud1 == 0)
     {
         higher_baudrate = 230400;
-        led_intv_ms = 500;
+        blink_rate = BLINK_RATE_230K;
     }
     else
     {
         higher_baudrate = 115200;
-        led_intv_ms = 1000;
+        blink_rate = BLINK_RATE_115K;
     }
 }
 
@@ -509,9 +543,9 @@ bool get_example_binaries_esp32s3(example_binaries_t *bins)
     return true;
 }
 
-#endif /* USE_HTTP_DOWNLOAD */
+#endif // ENABLE_HTTP_DOWNLOAD
 
-#endif /* SINGLE_TARGET_SUPPORT */
+#endif // SINGLE_TARGET_SUPPORT
 
 static bool do_flash(const char *name, const uint8_t *bin, size_t size, size_t address)
 {
@@ -562,7 +596,7 @@ void app_main(void)
     gpio_setup();
 
     led_configure();
-    xTaskCreate(led_blink, "led_blink", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(led_blink, "led_blink", 1024, NULL, configMAX_PRIORITIES - 1, NULL);
 
 #ifdef ENABLE_HTTP_DOWNLOAD
     esp_err_t err = nvs_flash_init();
@@ -583,9 +617,8 @@ void app_main(void)
      * examples/protocols/README.md for more information about this function.
      */
     ESP_ERROR_CHECK(example_connect());
+    LED_SET_CONNECTED();
 #endif
-
-    gpio_select_esp();
 
     example_binaries_t bin;
 #ifdef SINGLE_TARGET_SUPPORT        
@@ -597,9 +630,10 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "error getting binaries.");
         LED_FILE_ERROR();
-        led_intv_ms = 2000;
         return;
     }
+
+    gpio_select_esp();
 
 #ifdef ENABLE_UART_CHECK
     uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
@@ -609,7 +643,6 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "serial initialization failed.");
         LED_TARGET_ERROR();
-        led_intv_ms = 2000;
         return;
     }
 
@@ -620,18 +653,28 @@ void app_main(void)
     result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
     if(result)
     {
-        //result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
-        //result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
+#ifdef ENABLE_FLASH_BOOTLOADER
+        result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
+#endif
+
+#ifdef ENABLE_FLASH_PARTTABLE
+        result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
+#endif
+
         result &= do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
         if(result)
         {
-            // TODO: unmap partition?
             ESP_LOGI(TAG, "Success!");
+            blink_rate = BLINK_RATE_DEF;
         }
         else
         {
             LED_FLASH_ERROR();
         }
+
+#ifdef ENABLE_HTTP_DOWNLOAD            
+        esp_partition_munmap(download_map_handle);
+#endif
 
         esp_loader_reset_target();
 
@@ -648,7 +691,6 @@ void app_main(void)
     {
         LED_TARGET_ERROR();
     }
-    led_intv_ms = 2000;
 
     vTaskDelete(NULL);
 }
