@@ -39,7 +39,6 @@
 static const char *TAG = "serial_flasher";
 
 //#define ENABLE_UART_CHECK
-#define ENABLE_HTTP_DOWNLOAD
 
 // Flashing bootloader/partition table from HTTP server not supported/TBD.
 #ifndef ENABLE_HTTP_DOWNLOAD
@@ -295,7 +294,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 #define PARTITION_ADDRESS           0x8000
 #define APPLICATION_ADDRESS         0x10000
 
-void init_example_binaries_esp32s3(example_binaries_t *bins)
+void init_binaries_esp32s3(example_binaries_t *bins)
 {
     bins->boot.data = NULL;
     bins->boot.size = 0;
@@ -345,11 +344,11 @@ static void gpio_select_url(void)
     }
 }
 
-bool get_example_binaries_esp32s3(example_binaries_t *bins)
+bool get_binaries_esp32s3(example_binaries_t *bins)
 {
     bool result = false;
 
-    init_example_binaries_esp32s3(bins);    
+    init_binaries_esp32s3(bins);    
     gpio_select_url();
 
     int64_t t0_us = esp_timer_get_time();
@@ -542,9 +541,9 @@ extern const unsigned char partition_table_end[]   asm("_binary_partition_table_
 extern const unsigned char https_mbedtls_start[] asm("_binary_https_mbedtls_bin_start");
 extern const unsigned char https_mbedtls_end[]   asm("_binary_https_mbedtls_bin_end");
 
-bool get_example_binaries_esp32s3(example_binaries_t *bins)
+bool get_binaries_esp32s3(example_binaries_t *bins)
 {
-    init_example_binaries_esp32s3(bins);
+    init_binaries_esp32s3(bins);
     
     bins->boot.data = (const uint8_t *) &bootloader_start;
     bins->boot.size = bootloader_end - bootloader_start;
@@ -637,16 +636,16 @@ void app_main(void)
 
     example_binaries_t bin;
 #ifdef SINGLE_TARGET_SUPPORT        
-    result = get_example_binaries_esp32s3(&bin);
-#else
-    result = get_example_binaries(esp_loader_get_target(), &bin);
-#endif
+    result = get_binaries_esp32s3(&bin);
     if(!result)
     {
         ESP_LOGE(TAG, "error getting binaries.");
         LED_FILE_ERROR();
         return;
-    }
+    }    
+#else
+    get_example_binaries(esp_loader_get_target(), &bin);
+#endif
 
     gpio_select_esp();
 
