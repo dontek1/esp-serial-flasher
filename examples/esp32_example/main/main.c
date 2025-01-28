@@ -120,13 +120,13 @@ void led_blink(void *arg)
 
         switch(blink_rate)
         {
-            case BLINK_RATE_DEF: led_intv_ms = 2000; break;
             case BLINK_RATE_368M: led_intv_ms = 25; break;
             case BLINK_RATE_921K: led_intv_ms = 125; break;
             case BLINK_RATE_460K: led_intv_ms = 250; break;
             case BLINK_RATE_230K: led_intv_ms = 500; break;
             case BLINK_RATE_115K: led_intv_ms = 1000; break;
-            default: led_intv_ms = 2000; break; // BLINK_RATE_ERR
+            case BLINK_RATE_ERR: led_intv_ms = 5000; break;
+            default: led_intv_ms = 2000; break; // BLINK_RATE_DEF
         }
 
         vTaskDelay(pdMS_TO_TICKS(led_intv_ms));
@@ -313,11 +313,11 @@ void init_example_binaries_esp32s3(example_binaries_t *bins)
 #ifdef ENABLE_HTTP_DOWNLOAD
 
 #define DOWNLOAD_ADDRESS    (0x00281000)
-
 #define DOWNLOAD_PROGRESS   (10)
 
 esp_partition_mmap_handle_t download_map_handle;
 const void *download_map_ptr;
+bool download_mapped = false;
 
 #define DLD_BUF_SIZE 8192
 static char download_buf[DLD_BUF_SIZE+1] = {0};
@@ -411,18 +411,26 @@ bool get_example_binaries_esp32s3(example_binaries_t *bins)
                 if(data_read > sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
                 {
                     memcpy(&new_app_info, &download_buf[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)], sizeof(esp_app_desc_t));
-                    ESP_LOGI(TAG, "Firmware info (%lx)", new_app_info.magic_word);
-                    ESP_LOGI(TAG, "- project name: %s", new_app_info.project_name);
-                    ESP_LOGI(TAG, "- firmware version: %s", new_app_info.version);
-                    ESP_LOGI(TAG, "- IDF version: %s", new_app_info.idf_ver);
-                    ESP_LOGI(TAG, "- compiled date/time: %s %s", new_app_info.date, new_app_info.time);
-                    
-                    //TODO: validate...
-                    image_header_was_checked = true;
+                    if(new_app_info.magic_word == ESP_APP_DESC_MAGIC_WORD)
+                    {
+                        ESP_LOGI(TAG, "Firmware info");
+                        ESP_LOGI(TAG, "- project name: %s", new_app_info.project_name);
+                        ESP_LOGI(TAG, "- firmware version: %s", new_app_info.version);
+                        ESP_LOGI(TAG, "- IDF version: %s", new_app_info.idf_ver);
+                        ESP_LOGI(TAG, "- compiled date/time: %s %s", new_app_info.date, new_app_info.time);
+                        
+                        image_header_was_checked = true;
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Invalid magic word: %lx", new_app_info.magic_word);
+                        http_cleanup(client);
+                        break;
+                    }
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "received package is not fit len");
+                    ESP_LOGE(TAG, "Received package is not fit len");
                     http_cleanup(client);
                     break;
                 }
@@ -480,31 +488,39 @@ bool get_example_binaries_esp32s3(example_binaries_t *bins)
     result = esp_http_client_is_complete_data_received(client);
     if(result)
     {
-        int64_t t1_us = esp_timer_get_time();
-        int64_t tm_us = t1_us - t0_us;    
-        double tm_sec = (double) (tm_us / 1000000.0);
-        ESP_LOGI(TAG, "Downloaded & wrote %d bytes to flash in %.1f secs", bin_len, tm_sec);
-
-        const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
-        if(partition != NULL)
+        if(bin_len > 0)
         {
-            err = esp_partition_mmap(partition, 0, partition->size, ESP_PARTITION_MMAP_DATA, &download_map_ptr, &download_map_handle);
-            if(err == ESP_OK)
+            int64_t t1_us = esp_timer_get_time();
+            int64_t tm_us = t1_us - t0_us;    
+            double tm_sec = (double) (tm_us / 1000000.0);
+            ESP_LOGI(TAG, "Downloaded & wrote %d bytes to flash in %.1f secs", bin_len, tm_sec);
+
+            const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
+            if(partition != NULL)
             {
-                ESP_LOGI(TAG, "'download' partition mapped to data memory address %p", download_map_ptr);
-                bins->app.data = (const uint8_t *) download_map_ptr;
-                bins->app.size = bin_len;
+                err = esp_partition_mmap(partition, 0, partition->size, ESP_PARTITION_MMAP_DATA, &download_map_ptr, &download_map_handle);
+                if(err == ESP_OK)
+                {
+                    ESP_LOGI(TAG, "'download' partition mapped to data memory address %p", download_map_ptr);
+                    bins->app.data = (const uint8_t *) download_map_ptr;
+                    bins->app.size = bin_len;
+                    download_mapped = true;
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "esp_partition_mmap returned %d", err);
+                    result = false;
+                }
             }
             else
             {
-                ESP_LOGE(TAG, "esp_partition_mmap returned %d", err);
+                ESP_LOGE(TAG, "'download' partition is NULL");
                 result = false;
             }
         }
         else
         {
-            ESP_LOGE(TAG, "'download' partition is NULL");
-            result = false;
+            ESP_LOGW(TAG, "No data downloaded/flashed");
         }
     }
     else
@@ -512,7 +528,6 @@ bool get_example_binaries_esp32s3(example_binaries_t *bins)
         ESP_LOGE(TAG, "Error in receiving complete file");
     }
 
-    http_cleanup(client);
     return result;
 }
 
@@ -672,8 +687,11 @@ void app_main(void)
             LED_FLASH_ERROR();
         }
 
-#ifdef ENABLE_HTTP_DOWNLOAD            
-        esp_partition_munmap(download_map_handle);
+#ifdef ENABLE_HTTP_DOWNLOAD
+        if(download_mapped)
+        {
+            esp_partition_munmap(download_map_handle);
+        }
 #endif
 
         esp_loader_reset_target();
