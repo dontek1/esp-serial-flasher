@@ -46,15 +46,90 @@ static const char *TAG = "serial_flasher";
 #define ENABLE_FLASH_PARTTABLE
 #endif
 
+#define BOARD_TYPE_TEST     0
+#define BOARD_TYPE_SWC      1
+#define BOARD_TYPE          BOARD_TYPE_SWC
+
+#if BOARD_TYPE == BOARD_TYPE_TEST
+
+    #define ESP1_UART_NUM       UART_NUM_1
+    #define ESP2_UART_NUM       UART_NUM_2
+
+    #define LED_GPIO            GPIO_NUM_38
+
+    #define GPIO_ESP1_RX        GPIO_NUM_11
+    #define GPIO_ESP1_TX        GPIO_NUM_12
+    #define GPIO_ESP1_RST       GPIO_NUM_6
+    #define GPIO_ESP1_GPIO0     GPIO_NUM_7
+
+    #define GPIO_ESP2_RX        GPIO_NUM_17
+    #define GPIO_ESP2_TX        GPIO_NUM_18
+    #define GPIO_ESP2_RST       GPIO_NUM_4
+    #define GPIO_ESP2_GPIO0     GPIO_NUM_5
+
+    #define GPIO_INPUT_ESPn     GPIO_NUM_14
+
+    #define GPIO_INPUT_BAUD1    GPIO_NUM_45
+    #define GPIO_INPUT_BAUD2    GPIO_NUM_48
+    #define GPIO_INPUT_BAUD3    GPIO_NUM_47
+    #define GPIO_INPUT_BAUD4    GPIO_NUM_21
+
+    #define GPIO_INPUT_URL      GPIO_NUM_1
+
+    #define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_ESPn)\
+                                |(1ULL<<GPIO_INPUT_BAUD1)\
+                                |(1ULL<<GPIO_INPUT_BAUD2)\
+                                |(1ULL<<GPIO_INPUT_BAUD3)\
+                                |(1ULL<<GPIO_INPUT_BAUD4)\
+                                |(1ULL<<GPIO_INPUT_URL))
+
+#elif BOARD_TYPE == BOARD_TYPE_SWC
+
+    #define ESP1_UART_NUM       UART_NUM_1      // Power Board
+    #define ESP2_UART_NUM       UART_NUM_2      // IO Board
+
+    #define LED_GPIO            GPIO_NUM_1
+
+    #define GPIO_ESP1_RX        GPIO_NUM_5
+    #define GPIO_ESP1_TX        GPIO_NUM_4
+    #define GPIO_ESP1_RST       GPIO_NUM_6
+    #define GPIO_ESP1_GPIO0     GPIO_NUM_7
+
+    #define GPIO_ESP2_RX        GPIO_NUM_16
+    #define GPIO_ESP2_TX        GPIO_NUM_15
+    #define GPIO_ESP2_RST       GPIO_NUM_17
+    #define GPIO_ESP2_GPIO0     GPIO_NUM_18
+
+    #define GPIO_INPUT_ESPn     GPIO_NUM_8
+
+    #define GPIO_INPUT_BAUD1    GPIO_NUM_9
+    #define GPIO_INPUT_BAUD2    GPIO_NUM_10
+
+    #define GPIO_INPUT_URL      GPIO_NUM_11
+
+    #define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_ESPn)\
+                                |(1ULL<<GPIO_INPUT_BAUD1)\
+                                |(1ULL<<GPIO_INPUT_BAUD2)\
+                                |(1ULL<<GPIO_INPUT_URL))
+
+#else
+
+    #error "Please select the board type"
+
+#endif
+
+#define BAUD_RATE_DEF      115200
+
 static loader_esp32_config_t config =
 {
-    .baud_rate = 115200
+    .baud_rate = BAUD_RATE_DEF
 };
 
-static uint32_t higher_baudrate = 115200;
+static uint32_t higher_baudrate = BAUD_RATE_DEF;
 
 static led_strip_handle_t led_strip;
 
+// white
 static uint8_t R = 0x10;
 static uint8_t G = 0x10;
 static uint8_t B = 0x10;
@@ -72,21 +147,21 @@ enum blink_rate_e
 
 static uint8_t blink_rate = BLINK_RATE_DEF;
 
-#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)
-#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)
+#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)                     // blue
+#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)                     // orange
 
-#define LED_SET_CONNECTED()     do { R=0x00; G=0x80; B=0x00; } while(0)
+#define LED_SET_CONNECTED()     do { R=0x00; G=0x80; B=0x00; } while(0)                     // green        
 #define LED_SET_ERROR(r,g,b)    do { R=r; G=g; B=b; blink_rate=BLINK_RATE_ERR; } while(0)
 
-#define LED_FILE_ERROR()        LED_SET_ERROR(0x80,0x80,0x00)
-#define LED_TARGET_ERROR()      LED_SET_ERROR(0x80,0x00,0x80)
-#define LED_FLASH_ERROR()       LED_SET_ERROR(0x80,0x00,0x00)
+#define LED_FILE_ERROR()        LED_SET_ERROR(0x80,0x80,0x00)                               // yellow
+#define LED_TARGET_ERROR()      LED_SET_ERROR(0x80,0x00,0x80)                               // purple             
+#define LED_FLASH_ERROR()       LED_SET_ERROR(0x80,0x00,0x00)                               // red                
 
 static void led_configure(void)
 {
     led_strip_config_t strip_config =
     {
-        .strip_gpio_num = GPIO_NUM_38,
+        .strip_gpio_num = LED_GPIO,
         .max_leds = 1,
     };
     led_strip_rmt_config_t rmt_config =
@@ -138,11 +213,11 @@ static uint8_t slv_buf[SLV_BUF_LEN] = {0};
 
 void slave_monitor(void *arg)
 {
-    if(higher_baudrate != 115200)
+    if(higher_baudrate != BAUD_RATE_DEF)
     {
         uart_flush_input(config.uart_port);
         uart_flush(config.uart_port);
-        uart_set_baudrate(config.uart_port, 115200);
+        uart_set_baudrate(config.uart_port, BAUD_RATE_DEF);
     }
 
     while(1)
@@ -152,22 +227,6 @@ void slave_monitor(void *arg)
         printf("%s", slv_buf);
     }
 }
-
-#define GPIO_INPUT_ESPn     GPIO_NUM_14
-
-#define GPIO_INPUT_BAUD1    GPIO_NUM_45
-#define GPIO_INPUT_BAUD2    GPIO_NUM_48
-#define GPIO_INPUT_BAUD3    GPIO_NUM_47
-#define GPIO_INPUT_BAUD4    GPIO_NUM_21
-
-#define GPIO_INPUT_URL      GPIO_NUM_1
-
-#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_ESPn)\
-                            |(1ULL<<GPIO_INPUT_BAUD1)\
-                            |(1ULL<<GPIO_INPUT_BAUD2)\
-                            |(1ULL<<GPIO_INPUT_BAUD3)\
-                            |(1ULL<<GPIO_INPUT_BAUD4)\
-                            |(1ULL<<GPIO_INPUT_URL))
 
 static void gpio_setup(void)
 {
@@ -188,30 +247,31 @@ static void gpio_select_esp(void)
 {
     // GND --- IN.ESPn => select ESP
     int inEsp = gpio_get_level(GPIO_INPUT_ESPn);
-    ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_ESPn, inEsp);
-
+    ESP_LOGI(TAG, "Get GPIO%d = %d -> connect to %s board", GPIO_INPUT_ESPn, inEsp, inEsp ? "PWR" : "IO");
+    
     if(inEsp == 1)
     {
-        config.uart_port = UART_NUM_1;
-        config.uart_rx_pin = GPIO_NUM_11;
-        config.uart_tx_pin = GPIO_NUM_12;
-        config.reset_trigger_pin = GPIO_NUM_6;
-        config.gpio0_trigger_pin = GPIO_NUM_7;
+        config.uart_port = ESP1_UART_NUM;
+        config.uart_rx_pin = GPIO_ESP1_RX;
+        config.uart_tx_pin = GPIO_ESP1_TX;
+        config.reset_trigger_pin = GPIO_ESP1_RST;
+        config.gpio0_trigger_pin = GPIO_ESP1_GPIO0;
         LED_SET_ESP1();
     }
-    else
+    else // 0
     {
-        config.uart_port = UART_NUM_2;
-        config.uart_rx_pin = GPIO_NUM_17;
-        config.uart_tx_pin = GPIO_NUM_18;
-        config.reset_trigger_pin = GPIO_NUM_4;
-        config.gpio0_trigger_pin = GPIO_NUM_5;
+        config.uart_port = ESP2_UART_NUM;
+        config.uart_rx_pin = GPIO_ESP2_RX;
+        config.uart_tx_pin = GPIO_ESP2_TX;
+        config.reset_trigger_pin = GPIO_ESP2_RST;
+        config.gpio0_trigger_pin = GPIO_ESP2_GPIO0;
         LED_SET_ESP2();
     }
 }
 
 static void gpio_select_baud(void)
 {
+#if BOARD_TYPE == BOARD_TYPE_TEST
     // GND --- IN.Baud1-4 => select baud
     int inBaud1 = gpio_get_level(GPIO_INPUT_BAUD1);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD1, inBaud1);
@@ -224,7 +284,7 @@ static void gpio_select_baud(void)
 
     int inBaud4 = gpio_get_level(GPIO_INPUT_BAUD4);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD4, inBaud4);
-    
+
     if(inBaud4 == 0)
     {
         higher_baudrate = 3686400;
@@ -247,9 +307,38 @@ static void gpio_select_baud(void)
     }
     else
     {
-        higher_baudrate = 115200;
+        higher_baudrate = BAUD_RATE_DEF;
         blink_rate = BLINK_RATE_115K;
     }
+#else
+    // GND --- IN.Baud1-4 => select baud
+    int inBaud1 = gpio_get_level(GPIO_INPUT_BAUD1);
+    ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD1, inBaud1);
+
+    int inBaud2 = gpio_get_level(GPIO_INPUT_BAUD2);
+    ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD2, inBaud2);
+
+    if(inBaud1 == 1 && inBaud2 == 1)
+    {
+        higher_baudrate = 3686400;
+        blink_rate = BLINK_RATE_368M;
+    }
+    else if(inBaud1 == 1 && inBaud2 == 0)
+    {
+        higher_baudrate = 921600;
+        blink_rate = BLINK_RATE_921K;
+    }
+    else if(inBaud1 == 0 && inBaud2 == 1)
+    {
+        higher_baudrate = 460800;
+        blink_rate = BLINK_RATE_460K;
+    }
+    else
+    {
+        higher_baudrate = BAUD_RATE_DEF;
+        blink_rate = BLINK_RATE_115K;        
+    }
+#endif
 }
 
 #ifdef ENABLE_UART_CHECK
@@ -257,7 +346,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 {
     uart_config_t uart_config =
     {
-        .baud_rate = 115200,
+        .baud_rate = BAUD_RATE_DEF,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -269,7 +358,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
     ESP_ERROR_CHECK(uart_param_config(uart_port, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(uart_port, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    ESP_LOGI(TAG, "UART%lu opened, baud %dbps", uart_port, 115200);
+    ESP_LOGI(TAG, "UART%lu opened, baud %dbps", uart_port, uart_config.baud_rate);
 
     for(int i = 0; i < 30; i++)
     {
@@ -650,7 +739,7 @@ void app_main(void)
     gpio_select_esp();
 
 #ifdef ENABLE_UART_CHECK
-    uart_check(UART_NUM_1, GPIO_NUM_17, GPIO_NUM_18);
+    uart_check(config.uart_port, config.uart_tx_pin, config.uart_rx_pin);
 #endif
 
     if(loader_port_esp32_init(&config) != ESP_LOADER_SUCCESS)
@@ -661,7 +750,6 @@ void app_main(void)
     }
 
     gpio_select_baud();
-
     ESP_LOGI(TAG, "Connecting on UART%lu", config.uart_port);
 
     result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
