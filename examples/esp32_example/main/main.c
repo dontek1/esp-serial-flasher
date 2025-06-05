@@ -38,6 +38,8 @@
 
 static const char *TAG = "serial_flasher";
 
+#define FLASH_BACKUP_APP
+
 //#define ENABLE_UART_CHECK
 
 // Flashing bootloader/partition table from HTTP server not supported/TBD.
@@ -46,11 +48,11 @@ static const char *TAG = "serial_flasher";
 #define ENABLE_FLASH_PARTTABLE
 #endif
 
-#define BOARD_TYPE_TEST     0
+#define BOARD_TYPE_DEVKIT   0
 #define BOARD_TYPE_SWC      1
 #define BOARD_TYPE          BOARD_TYPE_SWC
 
-#if BOARD_TYPE == BOARD_TYPE_TEST
+#if BOARD_TYPE == BOARD_TYPE_DEVKIT
 
     #define ESP1_UART_NUM       UART_NUM_1
     #define ESP2_UART_NUM       UART_NUM_2
@@ -137,18 +139,18 @@ static uint8_t B = 0x10;
 enum blink_rate_e
 {
     BLINK_RATE_DEF=0,
-    BLINK_RATE_368M,
-    BLINK_RATE_921K,
-    BLINK_RATE_460K,
-    BLINK_RATE_230K,
     BLINK_RATE_115K,
+    BLINK_RATE_230K,
+    BLINK_RATE_460K,
+    BLINK_RATE_921K,
+    BLINK_RATE_368M,
     BLINK_RATE_ERR
 };
 
 static uint8_t blink_rate = BLINK_RATE_DEF;
 
-#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)                     // blue
-#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)                     // orange
+#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)                     // blue -> Power Board
+#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)                     // orange -> IO Board
 
 #define LED_SET_CONNECTED()     do { R=0x00; G=0x80; B=0x00; } while(0)                     // green        
 #define LED_SET_ERROR(r,g,b)    do { R=r; G=g; B=b; blink_rate=BLINK_RATE_ERR; } while(0)
@@ -271,7 +273,7 @@ static void gpio_select_esp(void)
 
 static void gpio_select_baud(void)
 {
-#if BOARD_TYPE == BOARD_TYPE_TEST
+#if BOARD_TYPE == BOARD_TYPE_DEVKIT
     // GND --- IN.Baud1-4 => select baud
     int inBaud1 = gpio_get_level(GPIO_INPUT_BAUD1);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_BAUD1, inBaud1);
@@ -320,18 +322,18 @@ static void gpio_select_baud(void)
 
     if(inBaud1 == 1 && inBaud2 == 1)
     {
-        higher_baudrate = 3686400;
-        blink_rate = BLINK_RATE_368M;
-    }
-    else if(inBaud1 == 1 && inBaud2 == 0)
-    {
         higher_baudrate = 921600;
         blink_rate = BLINK_RATE_921K;
     }
-    else if(inBaud1 == 0 && inBaud2 == 1)
+    else if(inBaud1 == 1 && inBaud2 == 0)
     {
         higher_baudrate = 460800;
         blink_rate = BLINK_RATE_460K;
+    }
+    else if(inBaud1 == 0 && inBaud2 == 1)
+    {
+        higher_baudrate = 230400;
+        blink_rate = BLINK_RATE_230K;
     }
     else
     {
@@ -381,7 +383,8 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 // For esp32s3 and later chips
 #define BOOTLOADER_ADDRESS_V1       0x0
 #define PARTITION_ADDRESS           0x8000
-#define APPLICATION_ADDRESS         0x10000
+#define APP_MAIN_ADDRESS            0x10000
+#define APP_BKUP_ADDRESS            0x290000
 
 void init_binaries_esp32s3(example_binaries_t *bins)
 {
@@ -395,7 +398,11 @@ void init_binaries_esp32s3(example_binaries_t *bins)
 
     bins->app.data  = NULL;
     bins->app.size  = 0;
-    bins->app.addr  = APPLICATION_ADDRESS;
+    #ifdef FLASH_BACKUP_APP    
+    bins->app.addr  = APP_BKUP_ADDRESS;
+    #else
+    bins->app.addr  = APP_MAIN_ADDRESS;
+    #endif
 }
 
 #ifdef ENABLE_HTTP_DOWNLOAD
@@ -441,6 +448,9 @@ bool get_binaries_esp32s3(example_binaries_t *bins)
     gpio_select_url();
 
     int64_t t0_us = esp_timer_get_time();
+    int64_t t1_us = 0;
+    int64_t tm_us = 0;
+    double tm_sec = 0.0;
 
     esp_http_client_config_t config =
     {
@@ -549,8 +559,19 @@ bool get_binaries_esp32s3(example_binaries_t *bins)
 
                 if(pct_read != pct_old)
                 {
-                    ESP_LOGI(TAG, "Downloading & writing to flash %d%%", pct_read);
                     pct_old = pct_read;
+                    t1_us = esp_timer_get_time();
+                    tm_us = t1_us - t0_us;    
+                    tm_sec = (double) (tm_us / 1000000.0);
+                    double kBs = (double) ((bin_len / 1024) / tm_sec);
+                    ESP_LOGI(TAG, "Downloading & writing to flash %d%% (%.1f kB/s)", pct_read, kBs);
+
+                    if(kBs > 50) blink_rate = BLINK_RATE_368M;
+                    else if(kBs > 40) blink_rate = BLINK_RATE_921K;
+                    else if(kBs > 30) blink_rate = BLINK_RATE_460K;
+                    else if(kBs > 20) blink_rate = BLINK_RATE_230K;
+                    else if(kBs > 10) blink_rate = BLINK_RATE_115K;
+                    else blink_rate = BLINK_RATE_DEF;
                 }
             }
         }
@@ -578,9 +599,9 @@ bool get_binaries_esp32s3(example_binaries_t *bins)
     {
         if(bin_len > 0)
         {
-            int64_t t1_us = esp_timer_get_time();
-            int64_t tm_us = t1_us - t0_us;    
-            double tm_sec = (double) (tm_us / 1000000.0);
+            t1_us = esp_timer_get_time();
+            tm_us = t1_us - t0_us;    
+            tm_sec = (double) (tm_us / 1000000.0);
             ESP_LOGI(TAG, "Downloaded & wrote %d bytes to flash in %.1f secs", bin_len, tm_sec);
 
             const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
@@ -699,7 +720,7 @@ void app_main(void)
     gpio_setup();
 
     led_configure();
-    xTaskCreate(led_blink, "led_blink", 1024, NULL, configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(led_blink, "led_blink", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
 
 #ifdef ENABLE_HTTP_DOWNLOAD
     esp_err_t err = nvs_flash_init();
