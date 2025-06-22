@@ -776,12 +776,32 @@ void app_main(void)
     result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
     if(result)
     {
+#if 1
+        // Not necessary, just to demonstrate the erase functions
+        esp_loader_error_t erase_err = esp_loader_flash_erase();
+        if(erase_err != ESP_LOADER_SUCCESS)
+		{
+            ESP_LOGE(TAG, "Failed to erase flash");
+            return;
+        }
+#endif
+		
 #ifdef ENABLE_FLASH_BOOTLOADER
         result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
 #endif
 
 #ifdef ENABLE_FLASH_PARTTABLE
         result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
+#endif
+
+#if 1
+		// Not necessary, just to demonstrate the erase functions
+        esp_loader_error_t erase_reg_err = esp_loader_flash_erase_region(0, 0x1000);
+        if(erase_reg_err != ESP_LOADER_SUCCESS)
+		{
+            ESP_LOGE(TAG, "Failed to erase flash region");
+            return;
+        }
 #endif
 
         result &= do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
@@ -801,6 +821,12 @@ void app_main(void)
             esp_partition_munmap(download_map_handle);
         }
 #endif
+
+
+
+
+        get_example_binaries(esp_loader_get_target(), &bin);
+
 
         esp_loader_reset_target();
 
