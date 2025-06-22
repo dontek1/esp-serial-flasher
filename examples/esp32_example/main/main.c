@@ -822,12 +822,6 @@ void app_main(void)
         }
 #endif
 
-
-
-
-        get_example_binaries(esp_loader_get_target(), &bin);
-
-
         esp_loader_reset_target();
 
         // Delay for skipping the boot message of the targets
