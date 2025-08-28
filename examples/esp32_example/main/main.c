@@ -38,7 +38,7 @@
 
 static const char *TAG = "serial_flasher";
 
-#define FLASH_BACKUP_APP
+//#define FLASH_BACKUP_APP
 
 //#define ENABLE_UART_CHECK
 
@@ -127,14 +127,16 @@ static loader_esp32_config_t config =
     .baud_rate = BAUD_RATE_DEF
 };
 
+static int selectedEsp = -1;
+
 static uint32_t higher_baudrate = BAUD_RATE_DEF;
 
 static led_strip_handle_t led_strip;
 
-// white
-static uint8_t R = 0x10;
-static uint8_t G = 0x10;
-static uint8_t B = 0x10;
+// yellow
+static uint8_t R = 0x80;
+static uint8_t G = 0x80;
+static uint8_t B = 0x00;
 
 enum blink_rate_e
 {
@@ -149,13 +151,13 @@ enum blink_rate_e
 
 static uint8_t blink_rate = BLINK_RATE_DEF;
 
-#define LED_SET_ESP1()          do { R=0x00; G=0x00; B=0x80; } while(0)                     // blue -> Power Board
-#define LED_SET_ESP2()          do { R=0xFF; G=0x45; B=0x00; } while(0)                     // orange -> IO Board
+#define LED_SET_ESP1()          do { R=0x10; G=0x10; B=0x10; } while(0)                     // white -> Power Board
+#define LED_SET_ESP2()          do { R=0x00; G=0x80; B=0x00; } while(0)                     // green -> IO Board
 
-#define LED_SET_CONNECTED()     do { R=0x00; G=0x80; B=0x00; } while(0)                     // green        
+#define LED_SET_CONNECTED()     do { R=0x00; G=0x00; B=0x80; } while(0)                     // blue        
 #define LED_SET_ERROR(r,g,b)    do { R=r; G=g; B=b; blink_rate=BLINK_RATE_ERR; } while(0)
 
-#define LED_FILE_ERROR()        LED_SET_ERROR(0x80,0x80,0x00)                               // yellow
+#define LED_FILE_ERROR()        LED_SET_ERROR(0xFF,0x45,0x00)                               // orange
 #define LED_TARGET_ERROR()      LED_SET_ERROR(0x80,0x00,0x80)                               // purple             
 #define LED_FLASH_ERROR()       LED_SET_ERROR(0x80,0x00,0x00)                               // red                
 
@@ -248,10 +250,10 @@ static void gpio_setup(void)
 static void gpio_select_esp(void)
 {
     // GND --- IN.ESPn => select ESP
-    int inEsp = gpio_get_level(GPIO_INPUT_ESPn);
-    ESP_LOGI(TAG, "Get GPIO%d = %d -> connect to %s board", GPIO_INPUT_ESPn, inEsp, inEsp ? "PWR" : "IO");
+    selectedEsp = gpio_get_level(GPIO_INPUT_ESPn);
+    ESP_LOGI(TAG, "Get GPIO%d = %d -> connect to %s board", GPIO_INPUT_ESPn, selectedEsp, selectedEsp ? "PWR" : "IO");
     
-    if(inEsp == 1)
+    if(selectedEsp == 1)
     {
         config.uart_port = ESP1_UART_NUM;
         config.uart_rx_pin = GPIO_ESP1_RX;
@@ -384,7 +386,7 @@ static void uart_check(uint32_t uart_port, uint32_t tx_pin, uint32_t rx_pin)
 #define BOOTLOADER_ADDRESS_V1       0x0
 #define PARTITION_ADDRESS           0x8000
 #define APP_MAIN_ADDRESS            0x10000
-#define APP_BKUP_ADDRESS            0x290000
+#define APP_BKUP_ADDRESS            0x310000
 
 void init_binaries_esp32s3(example_binaries_t *bins)
 {
@@ -407,7 +409,6 @@ void init_binaries_esp32s3(example_binaries_t *bins)
 
 #ifdef ENABLE_HTTP_DOWNLOAD
 
-#define DOWNLOAD_ADDRESS    (0x00281000)
 #define DOWNLOAD_PROGRESS   (10)
 
 esp_partition_mmap_handle_t download_map_handle;
@@ -426,6 +427,7 @@ static void http_cleanup(esp_http_client_handle_t client)
 char *http_url = NULL;
 static void gpio_select_url(void)
 {
+#if BOARD_TYPE == BOARD_TYPE_DEVKIT    
     // GND --- IN.URL => select url
     int inUrl = gpio_get_level(GPIO_INPUT_URL);
     ESP_LOGI(TAG, "Get GPIO%d = %d", GPIO_INPUT_URL, inUrl);
@@ -438,19 +440,39 @@ static void gpio_select_url(void)
     {
         http_url = "http://example.com/file2.bin";
     }
+#else
+    if(selectedEsp == 1)
+    {
+        http_url = "http://example.com/esp1.bin";
+    }
+    else
+    {
+        http_url = "http://example.com/esp2.bin";
+    }
+#endif    
 }
 
 bool get_binaries_esp32s3(example_binaries_t *bins)
 {
     bool result = false;
 
-    init_binaries_esp32s3(bins);    
+    init_binaries_esp32s3(bins);
     gpio_select_url();
 
     int64_t t0_us = esp_timer_get_time();
     int64_t t1_us = 0;
     int64_t tm_us = 0;
     double tm_sec = 0.0;
+
+    const esp_partition_t *dld_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
+    if(dld_part == NULL)
+    {
+        ESP_LOGE(TAG, "'download' partition is NULL");
+        return result;
+    }
+    
+    uint32_t write_address = dld_part->address;
+    ESP_LOGI(TAG, "bin file will be downloaded to 0x%lx (%ldKB available)", write_address, dld_part->size/1024);
 
     esp_http_client_config_t config =
     {
@@ -489,8 +511,6 @@ bool get_binaries_esp32s3(example_binaries_t *bins)
     int pct_old = -1;    
 
     bool image_header_was_checked = false;
-    
-    uint32_t write_address = DOWNLOAD_ADDRESS;
 
     while(1)
     {
@@ -604,26 +624,17 @@ bool get_binaries_esp32s3(example_binaries_t *bins)
             tm_sec = (double) (tm_us / 1000000.0);
             ESP_LOGI(TAG, "Downloaded & wrote %d bytes to flash in %.1f secs", bin_len, tm_sec);
 
-            const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "download");
-            if(partition != NULL)
+            err = esp_partition_mmap(dld_part, 0, dld_part->size, ESP_PARTITION_MMAP_DATA, &download_map_ptr, &download_map_handle);
+            if(err == ESP_OK)
             {
-                err = esp_partition_mmap(partition, 0, partition->size, ESP_PARTITION_MMAP_DATA, &download_map_ptr, &download_map_handle);
-                if(err == ESP_OK)
-                {
-                    ESP_LOGI(TAG, "'download' partition mapped to data memory address %p", download_map_ptr);
-                    bins->app.data = (const uint8_t *) download_map_ptr;
-                    bins->app.size = bin_len;
-                    download_mapped = true;
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "esp_partition_mmap returned %d", err);
-                    result = false;
-                }
+                ESP_LOGI(TAG, "'download' partition mapped to data memory address %p", download_map_ptr);
+                bins->app.data = (const uint8_t *) download_map_ptr;
+                bins->app.size = bin_len;
+                download_mapped = true;
             }
             else
             {
-                ESP_LOGE(TAG, "'download' partition is NULL");
+                ESP_LOGE(TAG, "esp_partition_mmap returned %d", err);
                 result = false;
             }
         }
@@ -744,6 +755,8 @@ void app_main(void)
     LED_SET_CONNECTED();
 #endif
 
+    gpio_select_esp();
+
     example_binaries_t bin;
 #ifdef SINGLE_TARGET_SUPPORT        
     result = get_binaries_esp32s3(&bin);
@@ -756,8 +769,6 @@ void app_main(void)
 #else
     get_example_binaries(esp_loader_get_target(), &bin);
 #endif
-
-    gpio_select_esp();
 
 #ifdef ENABLE_UART_CHECK
     uart_check(config.uart_port, config.uart_tx_pin, config.uart_rx_pin);
@@ -776,15 +787,13 @@ void app_main(void)
     result = (connect_to_target(higher_baudrate) == ESP_LOADER_SUCCESS);
     if(result)
     {
-#if 1
         // Not necessary, just to demonstrate the erase functions
-        esp_loader_error_t erase_err = esp_loader_flash_erase();
-        if(erase_err != ESP_LOADER_SUCCESS)
-		{
-            ESP_LOGE(TAG, "Failed to erase flash");
-            return;
-        }
-#endif
+        // esp_loader_error_t erase_err = esp_loader_flash_erase();
+        // if(erase_err != ESP_LOADER_SUCCESS)
+        // {
+        //     ESP_LOGE(TAG, "Failed to erase flash");
+        //     return;
+        // }
 		
 #ifdef ENABLE_FLASH_BOOTLOADER
         result &= do_flash("bootloader", bin.boot.data, bin.boot.size, bin.boot.addr);
@@ -794,15 +803,13 @@ void app_main(void)
         result &= do_flash("partition table", bin.part.data, bin.part.size, bin.part.addr);
 #endif
 
-#if 1
-		// Not necessary, just to demonstrate the erase functions
-        esp_loader_error_t erase_reg_err = esp_loader_flash_erase_region(0, 0x1000);
-        if(erase_reg_err != ESP_LOADER_SUCCESS)
-		{
-            ESP_LOGE(TAG, "Failed to erase flash region");
-            return;
-        }
-#endif
+        // Not necessary, just to demonstrate the erase functions
+        // esp_loader_error_t erase_reg_err = esp_loader_flash_erase_region(0, 0x1000);
+        // if(erase_reg_err != ESP_LOADER_SUCCESS)
+        // {
+        //     ESP_LOGE(TAG, "Failed to erase flash region");
+        //     return;
+        // }
 
         result &= do_flash("app", bin.app.data,  bin.app.size,  bin.app.addr);
         if(result)
